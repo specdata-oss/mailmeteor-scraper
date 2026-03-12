@@ -25,8 +25,6 @@ sheet_output = sheet.worksheet("Sheet2")
 urls = [u for u in sheet_input.col_values(1) if u and u.startswith("http")]
 
 print("URLs found:", len(urls))
-for i, url in enumerate(urls[:5]):
-    print(f"URL {i+1}: {url}")
 
 
 def extract_name(url):
@@ -36,32 +34,22 @@ def extract_name(url):
 
 
 async def scrape(url, semaphore):
-    async with semaphore:  # Limit concurrent requests
+    async with semaphore:
         name = extract_name(url)
         
         async with async_playwright() as p:
-            # Launch browser with more realistic settings
             browser = await p.chromium.launch(
                 headless=True,
                 args=[
                     '--disable-blink-features=AutomationControlled',
                     '--disable-dev-shm-usage',
                     '--no-sandbox',
-                    '--disable-setuid-sandbox',
-                    '--disable-web-security',
-                    '--disable-features=IsolateOrigins,site-per-process',
-                    '--start-maximized',
                 ]
             )
             
-            # Create context with realistic viewport and user agent
             context = await browser.new_context(
                 viewport={'width': 1920, 'height': 1080},
-                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                extra_http_headers={
-                    'Accept-Language': 'en-US,en;q=0.9',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                }
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
             )
             
             page = await context.new_page()
@@ -69,130 +57,100 @@ async def scrape(url, semaphore):
             try:
                 print(f"\n{'='*50}")
                 print(f"Processing: {name}")
-                print(f"URL: {url}")
                 
-                # Navigate with longer timeout but better error handling
-                try:
-                    response = await page.goto(url, timeout=60000, wait_until='domcontentloaded')
-                    if not response:
-                        print(f"  ⚠️ No response received")
-                except Exception as e:
-                    print(f"  ⚠️ Navigation warning: {str(e)}")
+                # Navigate to page
+                await page.goto(url, timeout=60000, wait_until='domcontentloaded')
                 
-                # Wait a bit for initial load
-                await asyncio.sleep(3)
+                # Wait for the email finder to load and find the email
+                print("  Waiting for email finder to load...")
                 
-                # Try to wait for content to load
-                try:
-                    await page.wait_for_load_state('networkidle', timeout=10000)
-                except:
-                    print("  ⚠️ Network idle timeout, continuing anyway...")
-                
-                # Additional wait for dynamic content
-                await asyncio.sleep(2)
-                
+                # Wait for the result to appear (not the placeholder)
                 email_found = None
                 
-                # Method 1: Look for email in specific elements
-                print("  Looking for email in page elements...")
-                
-                # Common selectors where email might appear
-                selectors = [
-                    'div[class*="email"]',
-                    'span[class*="email"]',
-                    'p[class*="email"]',
-                    'div[class*="result"]',
-                    'div[class*="found"]',
-                    '.email-address',
-                    '#email-result',
-                    '[data-testid="email"]',
-                    'div.email-display',
-                    'span.email-value',
-                    '.finder-result',
-                    '.email-finder-result',
-                ]
-                
-                for selector in selectors:
-                    try:
-                        elements = await page.query_selector_all(selector)
-                        for element in elements:
-                            text = await element.text_content()
-                            if text and '@' in text:
-                                text = text.strip()
-                                email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
-                                emails = re.findall(email_pattern, text)
-                                if emails:
-                                    email_found = emails[0]
-                                    print(f"  ✅ Found via selector '{selector}': {email_found}")
-                                    break
-                        if email_found:
-                            break
-                    except:
-                        continue
-                
-                # Method 2: Look for email in page text
-                if not email_found:
-                    print("  Searching page text for email...")
-                    try:
+                # Method 1: Wait for element that contains the real email
+                try:
+                    # Wait for the email to appear (this might take several seconds)
+                    print("  Looking for real email (not placeholder)...")
+                    
+                    # Wait up to 30 seconds for the real email
+                    for i in range(30):
+                        # Check if the placeholder is still there or if we have a real email
                         page_text = await page.text_content('body')
+                        
+                        # Look for email pattern that's NOT the placeholder
                         email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
                         emails = re.findall(email_pattern, page_text)
                         
-                        # Filter valid emails
-                        valid_emails = []
+                        # Filter out the placeholder
+                        real_emails = []
                         for email in emails:
-                            if not any(ext in email.lower() for ext in ['.png', '.jpg', '.gif', '.svg', '.css', '.js', '.ico']):
-                                if '.' in email.split('@')[1] and len(email) < 50:  # Reasonable email length
-                                    valid_emails.append(email)
+                            # Skip the generic placeholder
+                            if email != "firstname.lastname@company.com" and not email.endswith("@company.com"):
+                                # Additional check to ensure it's a real email with proper domain
+                                if '.' in email.split('@')[1] and len(email.split('@')[1].split('.')) >= 2:
+                                    real_emails.append(email)
                         
-                        if valid_emails:
-                            # Prefer emails that look like real names
-                            for email in valid_emails:
-                                if any(name_part.lower() in email.lower() for name_part in name.split()):
+                        if real_emails:
+                            # Pick the most likely real email
+                            for email in real_emails:
+                                # Check if email contains parts of the name
+                                name_parts = name.lower().split()
+                                if any(part in email.lower() for part in name_parts if len(part) > 2):
                                     email_found = email
                                     print(f"  ✅ Found name-match email: {email_found}")
                                     break
                             
-                            if not email_found:
-                                email_found = valid_emails[0]
-                                print(f"  ✅ Found email in text: {email_found}")
-                    except Exception as e:
-                        print(f"  ⚠️ Error searching page text: {str(e)}")
-                
-                # Method 3: Look for email near "valid" or "status" text
-                if not email_found:
-                    print("  Looking for email near status indicators...")
-                    try:
-                        # Look for elements containing "valid"
-                        valid_elements = await page.query_selector_all('*:has-text("valid")')
-                        for element in valid_elements:
-                            text = await element.text_content()
-                            if text and '@' in text:
-                                emails = re.findall(email_pattern, text)
-                                if emails:
-                                    email_found = emails[0]
-                                    print(f"  ✅ Found email near 'valid' text: {email_found}")
-                                    break
-                    except:
-                        pass
-                
-                # Method 4: Check for email in the URL (sometimes email is in the page source as a variable)
-                if not email_found:
-                    print("  Checking page source for email patterns...")
-                    try:
-                        content = await page.content()
-                        # Look for email in JavaScript variables
-                        patterns = [
-                            r'"email"\s*:\s*"([^"]+@[^"]+)"',
-                            r"'email'\s*:\s*'([^']+@[^']+)'",
-                            r'email[=:]\s*["\']([^"\']+@[^"\']+)["\']',
-                        ]
-                        for pattern in patterns:
-                            matches = re.findall(pattern, content)
-                            if matches:
-                                email_found = matches[0]
-                                print(f"  ✅ Found email in page source: {email_found}")
+                            if not email_found and real_emails:
+                                email_found = real_emails[0]
+                                print(f"  ✅ Found real email: {email_found}")
+                            
+                            if email_found:
                                 break
+                        
+                        # Also look for email in specific result elements
+                        try:
+                            # Look for elements that might contain the result
+                            result_elements = await page.query_selector_all('div[class*="result"], div[class*="email"], .email-result')
+                            for element in result_elements:
+                                text = await element.text_content()
+                                if text and '@' in text and text != "firstname.lastname@company.com":
+                                    emails = re.findall(email_pattern, text)
+                                    if emails and emails[0] != "firstname.lastname@company.com":
+                                        email_found = emails[0]
+                                        print(f"  ✅ Found email in result element: {email_found}")
+                                        break
+                            if email_found:
+                                break
+                        except:
+                            pass
+                        
+                        # Progress indicator
+                        if i % 5 == 0:
+                            print(f"  Still waiting... ({i+1}/30)")
+                        
+                        await asyncio.sleep(1)
+                        
+                except Exception as e:
+                    print(f"  ⚠️ Error while waiting for email: {str(e)}")
+                
+                # Method 2: If still not found, try to click any "Find Email" button if present
+                if not email_found:
+                    try:
+                        # Look for and click any search/find button
+                        buttons = await page.query_selector_all('button:has-text("Find"), button:has-text("Search"), button:has-text("Check")')
+                        if buttons:
+                            print("  Clicking search button...")
+                            await buttons[0].click()
+                            await asyncio.sleep(3)
+                            
+                            # Check again for email
+                            page_text = await page.text_content('body')
+                            email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
+                            emails = re.findall(email_pattern, page_text)
+                            real_emails = [e for e in emails if e != "firstname.lastname@company.com" and not e.endswith("@company.com")]
+                            if real_emails:
+                                email_found = real_emails[0]
+                                print(f"  ✅ Found email after clicking: {email_found}")
                     except:
                         pass
                 
@@ -200,21 +158,13 @@ async def scrape(url, semaphore):
                     print(f"✅ SUCCESS: {email_found}")
                     return [name, email_found, "Valid"]
                 else:
-                    print(f"❌ No email found for {name}")
+                    print(f"❌ No real email found for {name}")
                     
                     # Save debug info
                     try:
-                        # Screenshot
                         screenshot_path = f"debug_{name.replace(' ', '_')}.png"
                         await page.screenshot(path=screenshot_path)
                         print(f"  📸 Screenshot saved: {screenshot_path}")
-                        
-                        # HTML
-                        html_path = f"debug_{name.replace(' ', '_')}.html"
-                        html_content = await page.content()
-                        with open(html_path, 'w', encoding='utf-8') as f:
-                            f.write(html_content)
-                        print(f"  📄 HTML saved: {html_path}")
                     except:
                         pass
                     
@@ -237,7 +187,7 @@ async def run():
     print("="*50 + "\n")
     
     # Process URLs with concurrency limit
-    semaphore = asyncio.Semaphore(2)  # Process 2 URLs at a time
+    semaphore = asyncio.Semaphore(1)  # Process 1 URL at a time to be safe
     tasks = [scrape(url, semaphore) for url in urls]
     results = await asyncio.gather(*tasks, return_exceptions=True)
     
@@ -254,9 +204,16 @@ async def run():
         
         # Clear and update sheet
         try:
+            # Clear everything
             sheet_output.clear()
+            
+            # Add headers
             sheet_output.append_row(["Name", "Email", "Status"])
-            sheet_output.append_rows(processed_results)
+            
+            # Add results
+            for result in processed_results:
+                sheet_output.append_row(result)
+                
             print("✅ Results written to Google Sheet")
         except Exception as e:
             print(f"❌ Error writing to sheet: {str(e)}")
@@ -269,7 +226,8 @@ async def run():
     print("="*50)
     for result in processed_results:
         status_icon = "✅" if result[1] not in ["Not Found", "Error"] else "❌"
-        print(f"{status_icon} {result[0]:20} -> {result[1]}")
+        email_display = result[1][:30] + "..." if len(result[1]) > 30 else result[1]
+        print(f"{status_icon} {result[0]:20} -> {email_display}")
 
 
 if __name__ == "__main__":
