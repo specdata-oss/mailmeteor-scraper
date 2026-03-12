@@ -1,13 +1,14 @@
-name: run-scraper
+name: mailmeteor-scraper
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/30 * * * *"
+    - cron: "0 * * * *"
 
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 55
 
     steps:
       - uses: actions/checkout@v4
