@@ -6,13 +6,14 @@ from oauth2client.service_account import ServiceAccountCredentials
 from playwright.async_api import async_playwright
 
 SPREADSHEET_NAME = "EmailScraper"
+
 CONCURRENT_PAGES = 5
 CHECK_INTERVAL = 1
-MAX_CHECKS = 30
+MAX_CHECKS = 60
 
-# -----------------------
-# GOOGLE SHEETS
-# -----------------------
+# ---------------------------
+# GOOGLE SHEETS CONNECTION
+# ---------------------------
 scope = [
     "https://spreadsheets.google.com/feeds",
     "https://www.googleapis.com/auth/drive"
@@ -34,9 +35,10 @@ urls = [
 
 print("URLs found:", len(urls))
 
-# -----------------------
+
+# ---------------------------
 # HELPERS
-# -----------------------
+# ---------------------------
 def extract_name(url):
     try:
         query = parse_qs(urlparse(url).query)
@@ -60,12 +62,13 @@ def extract_email(text):
     return None
 
 
-# -----------------------
+# ---------------------------
 # SCRAPE ONE PAGE
-# -----------------------
+# ---------------------------
 async def scrape_page(context, url):
 
     name = extract_name(url)
+
     page = await context.new_page()
 
     try:
@@ -105,17 +108,28 @@ async def scrape_page(context, url):
         await page.close()
 
 
-# -----------------------
+# ---------------------------
 # MAIN SCRAPER
-# -----------------------
+# ---------------------------
 async def run_scraper():
 
     results = []
 
     async with async_playwright() as p:
 
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context()
+        browser = await p.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-dev-shm-usage"
+            ]
+        )
+
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+            viewport={"width": 1280, "height": 800}
+        )
 
         semaphore = asyncio.Semaphore(CONCURRENT_PAGES)
 
@@ -134,6 +148,7 @@ async def run_scraper():
         await browser.close()
 
     if results:
+
         sheet_output.append_rows(results)
 
     print("Finished. Rows written:", len(results))
