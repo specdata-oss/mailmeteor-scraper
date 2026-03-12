@@ -1,6 +1,7 @@
 import asyncio
 import json
 import gspread
+import re
 from urllib.parse import urlparse, parse_qs
 from oauth2client.service_account import ServiceAccountCredentials
 from playwright.async_api import async_playwright
@@ -23,7 +24,7 @@ sheet_output = sheet.worksheet("Sheet2")
 urls = [u for u in sheet_input.col_values(1) if u.startswith("http")]
 
 print("URLs found:", len(urls))
-for i, url in enumerate(urls[:5]):  # Print first 5 URLs for debugging
+for i, url in enumerate(urls[:5]):
     print(f"URL {i+1}: {url}")
 
 
@@ -37,43 +38,6 @@ async def scrape(context, url):
     name = extract_name(url)
     page = await context.new_page()
     
-    email_found = None
-    api_responses = []  # Store API responses for debugging
-
-    async def capture_response(response):
-        nonlocal email_found
-        
-        # Log all API responses for debugging
-        url = response.url
-        print(f"  Response from: {url}")
-        
-        # Look for email in any JSON response
-        try:
-            if "application/json" in response.headers.get("content-type", ""):
-                data = await response.json()
-                api_responses.append({"url": url, "data": data})
-                
-                # Check various possible email fields
-                if isinstance(data, dict):
-                    # Common email field names
-                    for field in ["email", "Email", "EMAIL", "data", "result", "email_address"]:
-                        if field in data and data[field] and "@" in str(data[field]):
-                            email_found = data[field]
-                            print(f"  ✅ Found email in {field}: {email_found}")
-                            return
-                    
-                    # Check nested objects
-                    if "data" in data and isinstance(data["data"], dict):
-                        for field in ["email", "Email"]:
-                            if field in data["data"] and data["data"][field]:
-                                email_found = data["data"][field]
-                                print(f"  ✅ Found email in data.{field}: {email_found}")
-                                return
-        except:
-            pass
-
-    page.on("response", capture_response)
-
     try:
         print(f"\nProcessing: {name}")
         print(f"URL: {url}")
@@ -81,53 +45,107 @@ async def scrape(context, url):
         # Navigate to the page
         await page.goto(url, timeout=60000)
         
-        # Wait for the page to load and API calls to complete
-        print("  Waiting for API responses...")
+        # Wait for the page to load completely
+        await page.wait_for_load_state("networkidle")
         
-        # Wait up to 30 seconds for email to be found
-        for i in range(15):  # 15 * 2 = 30 seconds
-            if email_found:
-                break
-            
-            # Also check the page content for email (in case it's in the DOM)
+        # Wait a bit for any dynamic content to load
+        await asyncio.sleep(5)
+        
+        # Method 1: Look for email in specific elements
+        email_found = None
+        
+        # Try to find email by common selectors
+        selectors = [
+            'div[class*="email"]',
+            'span[class*="email"]',
+            'p[class*="email"]',
+            'div[class*="result"]',
+            'div[class*="found"]',
+            '.email-address',
+            '#email-result',
+            '[data-testid="email"]',
+            'div:has-text("@")',
+            'span:has-text("@")',
+            'p:has-text("@")',
+        ]
+        
+        for selector in selectors:
             try:
-                # Look for email in the page text
-                page_text = await page.text_content('body')
-                if page_text and "@" in page_text:
-                    # Simple email extraction from text
-                    import re
-                    email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
-                    emails = re.findall(email_pattern, page_text)
-                    if emails:
-                        email_found = emails[0]
-                        print(f"  ✅ Found email in page text: {email_found}")
-                        break
+                elements = await page.query_selector_all(selector)
+                for element in elements:
+                    text = await element.text_content()
+                    if text and '@' in text:
+                        # Clean up the text and extract email
+                        text = text.strip()
+                        # Look for email pattern
+                        email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
+                        emails = re.findall(email_pattern, text)
+                        if emails:
+                            email_found = emails[0]
+                            print(f"  ✅ Found email via selector '{selector}': {email_found}")
+                            break
+                if email_found:
+                    break
+            except:
+                continue
+        
+        # Method 2: If not found, search entire page text
+        if not email_found:
+            print("  Searching entire page text...")
+            page_text = await page.text_content('body')
+            
+            # Look for email pattern
+            email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
+            emails = re.findall(email_pattern, page_text)
+            
+            if emails:
+                # Filter out common false positives
+                valid_emails = []
+                for email in emails:
+                    # Check if it's likely a real email (not an image filename, etc.)
+                    if not any(ext in email.lower() for ext in ['.png', '.jpg', '.gif', '.svg', '.css', '.js']):
+                        if '.' in email.split('@')[1]:  # Domain has a dot
+                            valid_emails.append(email)
+                
+                if valid_emails:
+                    email_found = valid_emails[0]
+                    print(f"  ✅ Found email in page text: {email_found}")
+        
+        # Method 3: Look for the email in the specific result area
+        if not email_found:
+            print("  Looking for email in result area...")
+            try:
+                # Try to find the result container (often appears after search)
+                result_container = await page.query_selector('div:has-text("valid")')
+                if result_container:
+                    parent = await result_container.query_selector('xpath=..')
+                    if parent:
+                        text = await parent.text_content()
+                        emails = re.findall(email_pattern, text)
+                        if emails:
+                            email_found = emails[0]
+                            print(f"  ✅ Found email near 'valid' text: {email_found}")
             except:
                 pass
+        
+        # Method 4: Take screenshot for debugging
+        if not email_found:
+            screenshot_path = f"debug_{name.replace(' ', '_')}.png"
+            await page.screenshot(path=screenshot_path)
+            print(f"  📸 Screenshot saved: {screenshot_path}")
             
-            await asyncio.sleep(2)
-            print(f"  Waiting... ({i+1}/15)")
+            # Also save page HTML for debugging
+            html_path = f"debug_{name.replace(' ', '_')}.html"
+            html_content = await page.content()
+            with open(html_path, 'w', encoding='utf-8') as f:
+                f.write(html_content)
+            print(f"  📄 HTML saved: {html_path}")
         
         if email_found:
-            print(f"✅ FOUND: {email_found}")
+            print(f"✅ SUCCESS: {email_found}")
             return [name, email_found, "Valid"]
         else:
             print(f"❌ No email found for {name}")
-            # Print debug info about API responses
-            if api_responses:
-                print(f"  API responses received: {len(api_responses)}")
-                for resp in api_responses:
-                    print(f"  - {resp['url'][:50]}...")
-            else:
-                print("  No API responses captured")
-            
-            # Check if email is visible in the page
-            try:
-                await page.screenshot(path=f"debug_{name.replace(' ', '_')}.png")
-                print(f"  Screenshot saved: debug_{name.replace(' ', '_')}.png")
-            except:
-                pass
-            
             return [name, "Not Found", "Not Found"]
 
     except Exception as e:
@@ -146,29 +164,36 @@ async def run():
     print("="*50 + "\n")
 
     async with async_playwright() as p:
-        # Launch with headless=False temporarily to see what's happening
+        # Launch browser
         browser = await p.chromium.launch(headless=True)
         
+        # Create context with realistic settings
         context = await browser.new_context(
             viewport={'width': 1280, 'height': 800},
             user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         )
         
-        # Process URLs one by one for better debugging
+        # Process URLs one by one
         for i, url in enumerate(urls):
             print(f"\n--- Processing {i+1}/{len(urls)} ---")
             result = await scrape(context, url)
             results.append(result)
-            # Add a small delay between requests to avoid rate limiting
-            await asyncio.sleep(2)
+            # Add delay between requests
+            await asyncio.sleep(3)
         
         await browser.close()
 
     if results:
         print(f"\nWriting {len(results)} results to Google Sheet...")
-        sheet_output.clear()  # Clear existing data
-        # Add headers
-        sheet_output.append_row(["Name", "Email", "Status"])
+        
+        # Clear existing data but keep headers
+        try:
+            sheet_output.clear()
+            sheet_output.append_row(["Name", "Email", "Status"])
+        except:
+            # If sheet is empty, just add headers
+            sheet_output.append_row(["Name", "Email", "Status"])
+        
         # Add results
         sheet_output.append_rows(results)
         print("✅ Results written to Google Sheet")
@@ -180,7 +205,8 @@ async def run():
     print("SUMMARY")
     print("="*50)
     for result in results:
-        print(f"{result[0]:20} -> {result[1]}")
+        status_icon = "✅" if result[1] != "Not Found" and result[1] != "Error" else "❌"
+        print(f"{status_icon} {result[0]:20} -> {result[1]}")
 
 
 if __name__ == "__main__":
