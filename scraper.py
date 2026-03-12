@@ -7,13 +7,12 @@ from playwright.async_api import async_playwright
 
 SPREADSHEET_NAME = "EmailScraper"
 
-CONCURRENT_PAGES = 5
+CONCURRENT_PAGES = 3
 CHECK_INTERVAL = 1
 MAX_CHECKS = 60
 
-# ---------------------------
-# GOOGLE SHEETS CONNECTION
-# ---------------------------
+
+# ---------------- GOOGLE SHEETS ----------------
 scope = [
     "https://spreadsheets.google.com/feeds",
     "https://www.googleapis.com/auth/drive"
@@ -23,22 +22,15 @@ creds = ServiceAccountCredentials.from_json_keyfile_name("creds.json", scope)
 client = gspread.authorize(creds)
 
 spreadsheet = client.open(SPREADSHEET_NAME)
-
 sheet_input = spreadsheet.sheet1
 sheet_output = spreadsheet.worksheet("Sheet2")
 
-urls = [
-    u.strip()
-    for u in sheet_input.col_values(1)
-    if u.strip().startswith("http")
-]
+urls = [u.strip() for u in sheet_input.col_values(1) if u.strip().startswith("http")]
 
 print("URLs found:", len(urls))
 
 
-# ---------------------------
-# HELPERS
-# ---------------------------
+# ---------------- HELPERS ----------------
 def extract_name(url):
     try:
         query = parse_qs(urlparse(url).query)
@@ -49,7 +41,6 @@ def extract_name(url):
 
 
 def extract_email(text):
-
     regex = r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"
     matches = re.findall(regex, text)
 
@@ -62,20 +53,19 @@ def extract_email(text):
     return None
 
 
-# ---------------------------
-# SCRAPE ONE PAGE
-# ---------------------------
+# ---------------- SCRAPE PAGE ----------------
 async def scrape_page(context, url):
 
     name = extract_name(url)
-
     page = await context.new_page()
 
     try:
-
         print("Processing:", name)
 
         await page.goto(url, timeout=60000)
+
+        # wait for page UI
+        await page.wait_for_selector("text=Email Finder", timeout=20000)
 
         for _ in range(MAX_CHECKS):
 
@@ -87,7 +77,7 @@ async def scrape_page(context, url):
                 print("FOUND:", email)
                 return [name, email, "Valid"]
 
-            if "No results found" in text or "couldn't find an email address" in text:
+            if "No results found" in text:
                 return [name, "Not Found", "Not Found"]
 
             if "Searching" in text:
@@ -99,18 +89,14 @@ async def scrape_page(context, url):
         return [name, "Not Found", "Timeout"]
 
     except Exception as e:
-
         print("Error:", e)
-
         return [name, "Error", str(e)]
 
     finally:
         await page.close()
 
 
-# ---------------------------
-# MAIN SCRAPER
-# ---------------------------
+# ---------------- MAIN ----------------
 async def run_scraper():
 
     results = []
@@ -127,18 +113,14 @@ async def run_scraper():
         )
 
         context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-            viewport={"width": 1280, "height": 800}
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
         )
 
         semaphore = asyncio.Semaphore(CONCURRENT_PAGES)
 
         async def worker(url):
-
             async with semaphore:
-
                 result = await scrape_page(context, url)
-
                 results.append(result)
 
         tasks = [worker(url) for url in urls]
@@ -148,7 +130,6 @@ async def run_scraper():
         await browser.close()
 
     if results:
-
         sheet_output.append_rows(results)
 
     print("Finished. Rows written:", len(results))
