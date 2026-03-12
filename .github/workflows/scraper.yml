@@ -3,6 +3,7 @@ name: Email Scraper
 on:
   schedule:
     - cron: "*/10 * * * *"
+  workflow_dispatch:
 
 jobs:
   run-scraper:
@@ -19,6 +20,9 @@ jobs:
 
       - name: Install dependencies
         run: pip install -r requirements.txt
+
+      - name: Create creds.json
+        run: echo '${{ secrets.GOOGLE_CREDENTIALS }}' > creds.json
 
       - name: Run scraper
         run: python scraper.py
